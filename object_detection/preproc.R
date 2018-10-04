@@ -1,10 +1,3 @@
-library(keras)
-library(rjson)
-library(magick)
-library(purrr)
-library(tibble)
-library(tidyr)
-library(dplyr)
 
 img_dir <- "data/VOCdevkit/VOC2007/JPEGImages"
 annot_file <- "data/pascal_train2007.json"
@@ -51,7 +44,7 @@ imageinfo <- imageinfo %>%
 
 nrow(imageinfo)
 
-img_data <- imageinfo[1, ]
+img_data <- imageinfo[3, ]
 img <- image_read(file.path(img_dir, img_data$file_name))
 img <- image_draw(img)
 rect(img_data$x_left, img_data$y_bottom,img_data$x_right, img_data$y_top, border = "white", lwd = 2)
