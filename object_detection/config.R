@@ -1,6 +1,7 @@
 reticulate::use_condaenv("tf-12-gpu-0924")
 
 library(keras)
+library(tensorflow)
 library(rjson)
 library(magick)
 library(purrr)

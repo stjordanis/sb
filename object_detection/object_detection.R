@@ -63,16 +63,6 @@ ssd_loss <- function(y_true, y_pred) {
   k_constant(1L)
 }
 
-ssd_loss_single <- function(y_true_bbox, y_true_class, y_pred_bbox, y_pred_class) {
-  acts <- activations_to_bboxes(y_pred_bbox, anchors)
-  y_extracted <- get_y(y_true_bbox, y_true_class)
-  y_true_bbox <- y_extracted[ , 1:4]
-  y_true_class <- y_extracted[ , 5]
-  
-  overlaps <- jaccard(y_true_bbox, anchor_corners)
-  list(1L, 1L)
-}
-
 activations_to_bboxes <- function(activations, anchors) {
   activations <- k_tanh(activations)
   activation_centers <- activations[ , 1:2]/2 * gridsize + anchors[ , 1:2]
@@ -98,44 +88,113 @@ get_y <- function(true_bbox,true_class) {
 intersect <- function(box1, box2) {
   #print(box1 %>% k_eval())
   #print(box2 %>% k_eval())
-  print(k_shape(box1)%>% k_eval())
-  print(k_shape(box2)%>% k_eval())
+  #print(k_shape(box1)%>% k_eval())
+  #print(k_shape(box2)%>% k_eval())
   
   box1_a <- box1[ , 3:4] %>% k_expand_dims(axis = 2)
   box2_a <- box2[ , 3:4] %>% k_expand_dims(axis = 1)
   #print(box1_a %>% k_eval())
   #print(box2_a %>% k_eval())
-  print(k_shape(box1_a)%>% k_eval())
-  print(k_shape(box2_a)%>% k_eval())
+  #print(k_shape(box1_a)%>% k_eval())
+  #print(k_shape(box2_a)%>% k_eval())
   max_xy <- k_minimum(box1_a, box2_a)
   #print(max_xy %>% k_eval())
-  print(k_shape(max_xy) %>% k_eval())
+  #print(k_shape(max_xy) %>% k_eval())
   
   box1_b <- box1[ , 1:2] %>% k_expand_dims(axis = 2)
   box2_b <- box2[ , 1:2] %>% k_expand_dims(axis = 1)
   #print(box1_b %>% k_eval())
   #print(box2_b %>% k_eval())
-  print(k_shape(box1_b)%>% k_eval())
-  print(k_shape(box2_b)%>% k_eval())
+  #print(k_shape(box1_b)%>% k_eval())
+  #print(k_shape(box2_b)%>% k_eval())
   min_xy <- k_maximum(box1_b, box2_b)
   #print(min_xy %>% k_eval())
-  print(k_shape(min_xy) %>% k_eval())
-  
+  #print(k_shape(min_xy) %>% k_eval())
+  intersection <- k_clip(max_xy - min_xy, min = 0, max = Inf)
+  intersection[ , , 1] * intersection[, , 2]
+
 }
+
+box_size <- function(box) {
+  (box[ , 3] - box[ , 1]) * (box[ , 4] - box[ , 2])
+} 
 
 jaccard <- function(bbox, anchor_corners) {
   intersection <- intersect(bbox, anchor_corners)
-  #union <- k_expand_dims(box_size(bbox), axis = 2)  + k_expand_dims(box_size(anchor_corners), axis = 1) - intersection
-  #intersection/union
+  #print(intersection %>% k_eval())
+  union <- k_expand_dims(box_size(bbox), axis = 2)  + k_expand_dims(box_size(anchor_corners), axis = 1) - intersection
+  #print(union %>% k_eval())
+  intersection/union
 }
 
+map_to_ground_truth <- function(overlaps) {
+  #print(overlaps %>% k_eval())
+  prior_overlap <- k_max(overlaps, axis = 2)
+  #print(prior_overlap %>% k_eval())
+  prior_idx <- k_argmax(overlaps, axis = 2)
+  #print(prior_idx %>% k_eval())
+  gt_overlap <- k_max(overlaps, axis = 1)
+  gt_idx <- k_argmax(overlaps, axis = 1)
+  
+  gt_overlap_eval <- gt_overlap %>% k_eval()
+  prior_idx_eval <- prior_idx %>% k_eval()
 
-# bbox,clas = get_y(bbox,clas)
-# a_ic = actn_to_bb(b_bb, anchors)
+  prior_idx_eval <- prior_idx_eval + 1 ##### !!
+  gt_idx_eval <- gt_idx %>% k_eval()
+  gt_idx_eval <- gt_idx_eval + 1 ##### !!
 
-# overlaps = jaccard(bbox.data, anchor_cnr.data)
-# gt_overlap,gt_idx = map_to_ground_truth(overlaps,print_it)
-# gt_clas = clas[gt_idx]
+  gt_overlap_eval[prior_idx_eval] <- 1.99
+
+  for(i in 1:length(prior_idx_eval)) {
+    p <- prior_idx_eval[i]
+    gt_idx_eval[p] <- i
+  }
+  
+  #print(gt_overlap_eval)
+  #print(gt_idx_eval) 
+  k_concatenate(list(k_constant(gt_overlap_eval), k_constant(gt_idx_eval - 1))) # subtracting again
+
+}
+
+ssd_loss_single <- function(y_true_bbox, y_true_class, y_pred_bbox, y_pred_class) {
+  acts <- activations_to_bboxes(y_pred_bbox, anchors)
+  y_extracted <- get_y(y_true_bbox, y_true_class)
+  y_true_bbox <- y_extracted[ , 1:4]
+  y_true_class <- y_extracted[ , 5]
+  
+  overlaps <- jaccard(y_true_bbox, anchor_corners)
+  #print(overlaps %>% k_eval())
+  overlaps <- map_to_ground_truth(overlaps)
+  #print(overlaps)
+  gt_overlap <- overlaps[1:16]
+  gt_idx <- overlaps[17:32] %>% k_cast("int32")
+  #print(gt_overlap %>% k_eval())
+  
+  #print(y_true_class %>% k_eval())
+  #print(gt_idx %>% k_eval())
+  
+  gt_class <- k_gather(y_true_class, gt_idx)
+  print(gt_class %>% k_eval())
+  
+  
+  list(1L, 1L)
+}
+  
+#parent_set <- k_constant(1:6)
+#new_set <- k_eval(parent_set)
+#indices <- k_constant(c(1L,4L), dtype = "int32")
+#indices_vals <- k_eval(indices)
+#new_set[indices_vals] <- 1.99
+#new_set
+
+#import keras
+#import keras.backend as k
+#import numpy as np
+#parent_set = k.constant(np.arange(6))
+#indices = k.constant([1,4], dtype="int32")
+#parent_set[2] = 1.99
+
+
 # pos = gt_overlap > 0.4
 # pos_idx = torch.nonzero(pos)[:,0]
 # gt_clas[1-pos] = len(id2cat)
@@ -152,8 +211,9 @@ test_y_true_bb <- matrix(c(91,47,223,169,0,49,205,180,9,169,217,222,
                            0,0,0,0,81,49,166,171,63,1,222,223), nrow = 2, ncol = 12, byrow = TRUE)
 test_y_true <- cbind(test_y_true_bb, test_y_true_cl) %>% k_constant()
 
-
-
+#ccc <- k_constant(c(1,14,14))
+#ddd <- k_constant(c(0L ,1L, 1L, 1L, 2L, 1L, 1L, 2L, 2L, 2L, 1L, 2L, 2L, 2L, 2L, 2L), dtype = "int32")
+#k_gather(ccc,ddd) %>% k_eval()
 
 feature_extractor <- application_resnet50(include_top = FALSE, input_shape = c(224, 224, 3))
 
