@@ -9,6 +9,7 @@ library(tibble)
 library(tidyr)
 library(dplyr)
 library(ggplot2)
+library(stringr)
 
 target_height <- 224
 target_width <- 224

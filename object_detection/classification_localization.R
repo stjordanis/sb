@@ -169,7 +169,7 @@ localization_generator <-
         x[j, , ,] <-
           load_and_preprocess_image(data[[indices[j], "file_name"]], target_height, target_width)
         y[j,] <-
-          data[indices[j], c("x_left", "y_top", "x_right", "y_bottom")] %>% as.matrix()
+          data[indices[j], c("x_left_scaled", "y_top_scaled", "x_right_scaled", "y_bottom_scaled")] %>% as.matrix()
       }
       list(x, y)
     }

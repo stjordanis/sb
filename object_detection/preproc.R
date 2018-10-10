@@ -29,7 +29,7 @@ boxinfo <- boxinfo %>% mutate(bbox = unlist(map(.$bbox, function(x) paste(x, col
 boxinfo <- boxinfo %>% separate(bbox, into = c("x_left", "y_top", "bbox_width", "bbox_height"))
 boxinfo <- boxinfo %>% mutate_all(as.numeric)
 boxinfo <- boxinfo %>% mutate(y_bottom = y_top + bbox_height - 1, x_right = x_left + bbox_width - 1)
-boxinfo <- boxinfo %>% mutate(area = bbox_width * bbox_height)
+
 
 catinfo <- annotations$categories %>%  {
   tibble(
@@ -41,6 +41,19 @@ catinfo <- annotations$categories %>%  {
 imageinfo <- imageinfo %>% 
   inner_join(boxinfo, by = c("id" = "image_id")) %>%
   inner_join(catinfo, by = c("category_id" = "id"))
+
+# scale bounding box info according to target_height and target_width
+imageinfo <- imageinfo %>% mutate(
+  x_left_scaled = x_left/image_width * target_width,
+  x_right_scaled = x_right/image_width * target_width,
+  y_top_scaled = y_top/image_height * target_height,
+  y_bottom_scaled = y_bottom/image_height * target_height,
+  bbox_width_scaled =  bbox_width/image_width * target_width,
+  box_height_scaled = bbox_height/image_height * target_height
+)
+
+imageinfo <- imageinfo %>% mutate(
+  area = bbox_width_scaled * bbox_height_scaled)
 
 nrow(imageinfo)
 
