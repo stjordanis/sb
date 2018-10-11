@@ -76,6 +76,7 @@ classification_generator <-
         y[j,] <-
           data[[indices[j], "category_id"]] - 1
       }
+      x <- x/255
       list(x, y)
     }
   }
@@ -171,6 +172,7 @@ localization_generator <-
         y[j,] <-
           data[indices[j], c("x_left_scaled", "y_top_scaled", "x_right_scaled", "y_bottom_scaled")] %>% as.matrix()
       }
+      x <- x/255
       list(x, y)
     }
   }
@@ -281,6 +283,7 @@ loc_class_generator <-
         y2[j,] <-
           data[[indices[j], "category_id"]] - 1
       }
+      x <- x/255
       list(x, list(y1, y2))
     }
   }
@@ -385,6 +388,7 @@ classification_generator <-
         y[j,] <-
           data[indices[j], 2:21] %>% as.matrix()
       }
+      x <- x/255
       list(x, y)
     }
   }

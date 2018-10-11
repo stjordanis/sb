@@ -20,14 +20,83 @@ imageinfo4ssd <- imageinfo %>%
 
 imageinfo4ssd <- imageinfo4ssd %>% 
   group_by(file_name) %>% 
-  summarise(categories = toString(category_id))
+  summarise(categories = toString(category_id),
+            xl = toString(x_left_scaled),
+            yt = toString(y_top_scaled),
+            xr = toString(x_right_scaled),
+            yb = toString(y_bottom_scaled),
+            cnt = n())
 
-# separate??
-# then: bboxes
+imageinfo4ssd %>% arrange(desc(cnt)) # max is 37
 
+max_pad <- 37
 
-# we need  c("x_left_scaled", "y_top_scaled", "x_right_scaled", "y_bottom_scaled")]
+# Generator ---------------------------------------------------------------
 
+ssd_generator <-
+  function(data,
+           max_pad,
+           target_height,
+           target_width,
+           shuffle,
+           batch_size) {
+    i <- 1
+    function() {
+      if (shuffle) {
+        indices <- sample(1:nrow(data), size = batch_size)
+      } else {
+        if (i + batch_size >= nrow(data))
+          i <<- 1
+        indices <- c(i:min(i + batch_size - 1, nrow(data)))
+        i <<- i + length(indices)
+      }
+      x <-
+        array(0, dim = c(length(indices), target_height, target_width, 3))
+      y_maxlen <- 4 * max_pad + max_pad # 185
+      y <- array(0, dim = c(length(indices), y_maxlen))
+      
+      for (j in 1:length(indices)) {
+        x[j, , ,] <-
+          load_and_preprocess_image(data[[indices[j], "file_name"]], target_height, target_width)
+        
+        class_string <- data[indices[j], ]$categories
+        classes <-  str_split(class_string, pattern = ", ")[[1]]
+        n_classes <- length(classes)
+        y[j, (y_maxlen - n_classes + 1):y_maxlen] <- classes
+        
+        xl_string <- data[indices[j], ]$xl
+        yt_string <- data[indices[j], ]$yt
+        xr_string <- data[indices[j], ]$xr
+        yb_string <- data[indices[j], ]$yb
+        
+        xl <-  str_split(xl_string, pattern = ", ")[[1]] %>% as.integer()
+        yt <-  str_split(yt_string, pattern = ", ")[[1]] %>% as.integer()
+        xr <-  str_split(xr_string, pattern = ", ")[[1]] %>% as.integer()
+        yb <-  str_split(yb_string, pattern = ", ")[[1]] %>% as.integer()
+        
+        boxes_maxlen <- 4 * max_pad
+        boxes <- c(rbind(xl,yt,xr, yb)) 
+        y[j, (boxes_maxlen - 4 * n_classes + 1):boxes_maxlen] <- boxes
+         
+      }
+      x <- x/255
+      list(x, y)
+    }
+  }
+
+train_gen <- ssd_generator(
+  imageinfo4ssd,
+  max_pad = 37,
+  target_height = target_height,
+  target_width = target_width,
+  shuffle = TRUE,
+  batch_size = batch_size
+)
+
+batch <- train_gen()
+c(x,y) %<-% train_gen()
+x %>% dim()
+y
 
 # Construct anchors  ------------------------------------------------------
 
@@ -338,9 +407,6 @@ model <-
 # outputs should be ([bs, 16, 4]) and ([bs, 16, 21])
 # total output is (bs, 16, 25)
 
-# a = torch.rand(64, 4, 4, 21)
-# a.shape
-# a.view(64, -1, 21).shape
 
 model %>% freeze_weights()
 model
@@ -348,8 +414,6 @@ model %>% unfreeze_weights(from = "head_conv1")
 model
        
 
-### preproc
-# scale bbs
 
 ############ tbd with model predictions
 
