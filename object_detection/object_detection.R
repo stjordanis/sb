@@ -50,29 +50,33 @@ ssd_generator <-
         indices <- c(i:min(i + batch_size - 1, nrow(data)))
         i <<- i + length(indices)
       }
+
       x <-
         array(0, dim = c(length(indices), target_height, target_width, 3))
       y_maxlen <- 4 * max_pad + max_pad # 185
       y <- array(0, dim = c(length(indices), y_maxlen))
       
       for (j in 1:length(indices)) {
+        print(j)
         x[j, , ,] <-
           load_and_preprocess_image(data[[indices[j], "file_name"]], target_height, target_width)
         
         class_string <- data[indices[j], ]$categories
+        print(class_string)
         classes <-  str_split(class_string, pattern = ", ")[[1]]
+        print(classes)
         n_classes <- length(classes)
-        y[j, (y_maxlen - n_classes + 1):y_maxlen] <- classes
+        y[j, (y_maxlen - n_classes + 1):y_maxlen] <- as.double(classes)
         
         xl_string <- data[indices[j], ]$xl
         yt_string <- data[indices[j], ]$yt
         xr_string <- data[indices[j], ]$xr
         yb_string <- data[indices[j], ]$yb
         
-        xl <-  str_split(xl_string, pattern = ", ")[[1]] %>% as.integer()
-        yt <-  str_split(yt_string, pattern = ", ")[[1]] %>% as.integer()
-        xr <-  str_split(xr_string, pattern = ", ")[[1]] %>% as.integer()
-        yb <-  str_split(yb_string, pattern = ", ")[[1]] %>% as.integer()
+        xl <-  str_split(xl_string, pattern = ", ")[[1]] %>% as.double()
+        yt <-  str_split(yt_string, pattern = ", ")[[1]] %>% as.double()
+        xr <-  str_split(xr_string, pattern = ", ")[[1]] %>% as.double()
+        yb <-  str_split(yb_string, pattern = ", ")[[1]] %>% as.double()
         
         boxes_maxlen <- 4 * max_pad
         boxes <- c(rbind(xl,yt,xr, yb)) 
@@ -89,14 +93,16 @@ train_gen <- ssd_generator(
   max_pad = 37,
   target_height = target_height,
   target_width = target_width,
-  shuffle = TRUE,
+  #shuffle = TRUE,
+  shuffle = FALSE,
   batch_size = batch_size
 )
 
 batch <- train_gen()
-c(x,y) %<-% train_gen()
+c(x,y) %<-% batch
 x %>% dim()
-y
+y_boxes <- y[ , 1:(max_pad * 4)]
+y_classes <- y[ , (max_pad * 4 + 1):(max_pad * 4 + max_pad)]
 
 # Construct anchors  ------------------------------------------------------
 
@@ -147,22 +153,50 @@ ssd_loss <- function(y_true, y_pred) {
   loc_loss_batch <- k_constant(0)
   class_loss_batch <- k_constant(0)
   
-  # loop over batch
-  for (i in 1:nrow(y_true)) {
-    
-    # deconstruct ground truth and predictions into bounding boxes and class predictions
-    y_true_bbox <- y_true[i, 1:12]
-    y_true_class <- y_true[i, 13:15]
-
-    y_pred_bbox <- y_pred[i, , 1:4] 
-    y_pred_class <- y_pred[i, , 5:25]
-    
-    losses <- ssd_loss_single(y_true_bbox, y_true_class, y_pred_bbox, y_pred_class)
-    loc_loss_batch <- loc_loss_batch + losses[[1]]
-    class_loss_batch <- class_loss_batch + losses[[2]]
-  }
+  batch_shape <- k_shape(y_true)[1]
+  i <- k_constant(1L, dtype = "int32")
+  max_pad <- k_constant(as.integer(max_pad), dtype = "int32")
+  classes_start <- max_pad * 4L + 1L
+  last_pos <- max_pad * 4L + max_pad
   
+  condition <- function(
+    y_true, y_pred, loc_loss_batch, class_loss_batch, i, batch_shape) tf$less(i, batch_shape)
+  
+  do <- function(y_true, y_pred, loc_loss_batch, class_loss_batch, i, batch_shape) {
+    #y_true_bbox <- y_true[i, 1L:k_cast(max_pad * 4L, "int32")]
+    y_true_class <- y_true[i, classes_start:last_pos]
+    y_pred_bbox <- y_pred[i, , 1L:4L] 
+    y_pred_class <- y_pred[i, , 5L:25L]
+    list(
+      y_true, y_pred, loc_loss_batch, class_loss_batch, tf$add(i, 1L), batch_shape
+    )
+  }
+
+  tf$while_loop(
+    condition,
+    do,
+    list(y_true, y_pred, loc_loss_batch, class_loss_batch, i, batch_shape)
+  )
+ 
+  
+  # loop over batch
+  # for (i in 1:nrow(y_true)) {
+  #   
+  #   # deconstruct ground truth and predictions into bounding boxes and class predictions
+  #   y_true_bbox <- y_true[i, 1:12]
+  #   y_true_class <- y_true[i, 13:15]
+  # 
+  #   y_pred_bbox <- y_pred[i, , 1:4] 
+  #   y_pred_class <- y_pred[i, , 5:25]
+  #   
+  #   #losses <- ssd_loss_single(y_true_bbox, y_true_class, y_pred_bbox, y_pred_class)
+  #   #loc_loss_batch <- loc_loss_batch + losses[[1]]
+  #   #class_loss_batch <- class_loss_batch + losses[[2]]
+  # }
+  
+  #k_eval(loc_loss_batch + class_loss_batch) %>% print()
   loc_loss_batch + class_loss_batch
+  
 
 }
 
@@ -361,18 +395,15 @@ map_to_ground_truth <- function(overlaps) {
 
 
 
-n_classes <- tf$constant(21L, dtype = "int32")
 
-ssd_loss(test_y_true, test_y_pred) %>% k_eval()
+# test_y_pred <- array(runif(batch_size * 16 * 25), dim = c(batch_size, 16, 25)) %>% k_constant()
+# 
+# test_y_true_cl <- matrix(c(1,14,14,0,11,17), nrow = 2, ncol = 3, byrow = TRUE)
+# test_y_true_bb <- matrix(c(91,47,223,169,0,49,205,180,9,169,217,222,
+#                            0,0,0,0,81,49,166,171,63,1,222,223), nrow = 2, ncol = 12, byrow = TRUE)
+# test_y_true <- cbind(test_y_true_bb, test_y_true_cl) %>% k_constant()
 
-
-
-test_y_pred <- array(runif(batch_size * 16 * 25), dim = c(batch_size, 16, 25)) %>% k_constant()
-
-test_y_true_cl <- matrix(c(1,14,14,0,11,17), nrow = 2, ncol = 3, byrow = TRUE)
-test_y_true_bb <- matrix(c(91,47,223,169,0,49,205,180,9,169,217,222,
-                           0,0,0,0,81,49,166,171,63,1,222,223), nrow = 2, ncol = 12, byrow = TRUE)
-test_y_true <- cbind(test_y_true_bb, test_y_true_cl) %>% k_constant()
+#ssd_loss(test_y_true, test_y_pred) %>% k_eval()
 
 
 
@@ -380,9 +411,9 @@ test_y_true <- cbind(test_y_true_bb, test_y_true_cl) %>% k_constant()
 
 
 
-n_anchors_per_cell <- 1
+#n_anchors_per_cell <- 1
 
-n_filters <- n_anchors_per_cell * (4 + n_classes)
+#n_filters <- n_anchors_per_cell * (4 + n_classes)
 
 
 feature_extractor <- application_resnet50(include_top = FALSE, input_shape = c(224, 224, 3))
@@ -396,23 +427,24 @@ common <- feature_extractor$output %>%
 
 bbox_conv <- layer_conv_2d(common, filters = 4, kernel_size = 3, padding = "same", name = "bbox_conv") %>%
   layer_reshape(target_shape = c(-1, 4), name = "bbox_flatten")
-class_conv <- layer_conv_2d(common, filters = n_classes, kernel_size = 3, padding = "same", name = "class_conv") %>%
+class_conv <- layer_conv_2d(common, filters = n_classes + 1, kernel_size = 3, padding = "same", name = "class_conv") %>%
   layer_reshape(target_shape = c(-1, 21), name = "class_flatten")
+# outputs are ([bs, 16, 4]) and ([bs, 16, 21])
+# total output is (bs, 16, 25)
 concat <- layer_concatenate(list(bbox_conv, class_conv))
 
 model <-
   keras_model(inputs = input,
               outputs = concat)
 
-# outputs should be ([bs, 16, 4]) and ([bs, 16, 21])
-# total output is (bs, 16, 25)
-
-
 model %>% freeze_weights()
 model
 model %>% unfreeze_weights(from = "head_conv1")
 model
        
+model %>% compile(loss = ssd_loss, optimizer = "adam")
+
+
 
 
 ############ tbd with model predictions

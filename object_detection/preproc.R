@@ -44,12 +44,12 @@ imageinfo <- imageinfo %>%
 
 # scale bounding box info according to target_height and target_width
 imageinfo <- imageinfo %>% mutate(
-  x_left_scaled = x_left/image_width * target_width,
-  x_right_scaled = x_right/image_width * target_width,
-  y_top_scaled = y_top/image_height * target_height,
-  y_bottom_scaled = y_bottom/image_height * target_height,
-  bbox_width_scaled =  bbox_width/image_width * target_width,
-  box_height_scaled = bbox_height/image_height * target_height
+  x_left_scaled = (x_left/image_width * target_width) %>% round(),
+  x_right_scaled = (x_right/image_width * target_width) %>% round(),
+  y_top_scaled = (y_top/image_height * target_height) %>% round(),
+  y_bottom_scaled = (y_bottom/image_height * target_height) %>% round(),
+  bbox_width_scaled =  (bbox_width/image_width * target_width) %>% round(),
+  bbox_height_scaled = (bbox_height/image_height * target_height) %>% round()
 )
 
 imageinfo <- imageinfo %>% mutate(
