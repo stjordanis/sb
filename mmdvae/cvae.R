@@ -1,4 +1,5 @@
-# http://szhao.me/2017/06/10/a-tutorial-on-mmd-variational-autoencoders.html
+# https://github.com/tensorflow/tensorflow/blob/r1.11/tensorflow/contrib/eager/python/examples/generative_examples/cvae.ipynb
+
 reticulate::use_condaenv("tf-12-gpu-0410")
 
 library(keras)
@@ -11,6 +12,7 @@ library(dplyr)
 library(ggplot2)
 library(glue)
 
+#mnist <- dataset_mnist()
 mnist <- dataset_fashion_mnist()
 
 c(train_images, train_labels) %<-% mnist$train
@@ -54,14 +56,15 @@ encoder_model <- function(name = NULL) {
         activation = "relu"
       )
     self$flatten <- layer_flatten()
-    self$dense <- layer_dense(units = latent_dim)
+    self$dense <- layer_dense(units = 2 * latent_dim)
     
     function (x, mask = NULL) {
       x %>%
         self$conv1() %>%
         self$conv2() %>%
         self$flatten() %>%
-        self$dense() 
+        self$dense() %>%
+        tf$split(num_or_size_splits = 2L, axis = 1) # 0-based
     }
   })
 }
@@ -92,8 +95,7 @@ decoder_model <- function(name = NULL) {
         filters = 1,
         kernel_size = 3,
         strides = 1,
-        padding = "same",
-        activation = "sigmoid"
+        padding = "same"
       )
     
     function (x, mask = NULL) {
@@ -108,28 +110,22 @@ decoder_model <- function(name = NULL) {
 }
 
 
-# Loss --------------------------------------------------------------------
+# Sampling and loss --------------------------------------------------------------------
 
+reparameterize <- function(mean, logvar) {
+  eps = tf$random_normal(shape = mean$shape)
+  tf$exp(logvar * .5) + mean
+}
+
+
+normal_loglik <- function(sample, mean, logvar, reduce_axis = 1L) {
+  loglik <-  k_constant(0.5, dtype = tf$float64) * (tf$log(2 * k_constant(pi, dtype = tf$float64)) +
+                                                      logvar +
+                                                      tf$exp(-logvar) * (sample - mean) ^ 2)
+  - tf$reduce_sum(loglik, axis = reduce_axis)
+}
 
 optimizer <- tf$train$AdamOptimizer(1e-4)
-
-compute_kernel <- function(x, y) {
-  x_size <- k_shape(x)[1]
-  y_size <- k_shape(y)[1]
-  dim <- k_shape(x)[2]
-  # (28,28,28)
-  tiled_x <- k_tile(k_reshape(x, k_stack(list(x_size, 1, dim))), k_stack(list(1, y_size, 1)))
-  tiled_y <- k_tile(k_reshape(y, k_stack(list(1, y_size, dim))), k_stack(list(x_size, 1, 1)))
-  k_exp(-k_mean(k_square(tiled_x - tiled_y), axis = 3) / k_cast(dim, tf$float64))
-}
-
-compute_mmd <- function(x, y, sigma_sqr = 1) {
-  x_kernel <- compute_kernel(x, x)
-  y_kernel <- compute_kernel(y, y)
-  xy_kernel <- compute_kernel(x, y)
-  k_mean(x_kernel) + k_mean(y_kernel) - 2 * k_mean(xy_kernel)
-}
-
 
 
 # Generation --------------------------------------------------------------
@@ -141,8 +137,8 @@ random_vector_for_generation <- k_random_normal(shape = list(num_examples_to_gen
 
 generate_random_digits <- function(epoch) {
   predictions <-
-    decoder(random_vector_for_generation) 
-  png(paste0("mmd_digits_epoch_", epoch, ".png"))
+    decoder(random_vector_for_generation) %>% tf$nn$sigmoid()
+  png(paste0("fashion_cvae_digits_epoch_", epoch, ".png"))
   par(mfcol = c(4, 4))
   par(mar = c(0.5, 0.5, 0.5, 0.5),
       xaxs = 'i',
@@ -166,7 +162,7 @@ generate_random_digits <- function(epoch) {
 show_latent_space <- function(epoch) {
   iter <- make_iterator_one_shot(test_dataset)
   x <-  iterator_get_next(iter)
-  x_test_encoded <- encoder(x)
+  x_test_encoded <- encoder(x)[[1]]
   x_test_encoded %>%
     as.matrix() %>%
     as.data.frame() %>%
@@ -174,7 +170,7 @@ show_latent_space <- function(epoch) {
     ggplot(aes(x = V1, y = V2, colour = class)) + geom_point() +
     theme(aspect.ratio = 1)
   ggsave(
-    paste0("mmd_latentspace_epoch_", epoch, ".png"),
+    paste0("fashion_cvae_latentspace_epoch_", epoch, ".png"),
     width = 10,
     height = 10,
     units = "cm"
@@ -184,7 +180,7 @@ show_latent_space <- function(epoch) {
 
 show_grid <- function(epoch) {
   
-  png(paste0("mmd_grid_epoch_", epoch, ".png"))
+  png(paste0("fashion_cvae_grid_epoch_", epoch, ".png"))
   
   n <- 16
   digit_size <- 28
@@ -200,7 +196,7 @@ show_grid <- function(epoch) {
       column <-
         rbind(
           column,
-          (decoder(z_sample) %>% as.numeric()) %>% matrix(ncol = digit_size)
+          (decoder(z_sample) %>% tf$nn$sigmoid() %>% as.numeric()) %>% matrix(ncol = digit_size)
         )
     }
     rows <- cbind(rows, column)
@@ -217,7 +213,7 @@ num_epochs <- 100
 encoder <- encoder_model()
 decoder <- decoder_model()
 
-checkpoint_dir <- "./checkpoints_mmd_fashion"
+checkpoint_dir <- "./checkpoints_fashion_cvae"
 checkpoint_prefix <- file.path(checkpoint_dir, "ckpt")
 checkpoint <-
   tf$train$Checkpoint(optimizer = optimizer,
@@ -233,39 +229,51 @@ for (epoch in seq_len(num_epochs)) {
   iter <- make_iterator_one_shot(train_dataset)
   
   total_loss <- 0
-  loss_nll_total <- 0
-  loss_mmd_total <- 0
+  logpx_z_total <- 0
+  logpz_total <- 0
+  logqz_x_total <- 0
   
   until_out_of_range({
     x <-  iterator_get_next(iter)
     
     with(tf$GradientTape(persistent = TRUE) %as% tape, {
-      
-      mean <- encoder(x)
-      
-      # not needed it seems??
-      #z <- reparameterize(mean, logvar)
+      # both of shape (bs, 2)
+      c(mean, logvar) %<-% encoder(x)
+      z <- reparameterize(mean, logvar)
       # shape is (bs, 28, 28, 1)
-      preds <- decoder(mean)
+      preds <- decoder(z)
       
-      true_samples <- k_random_normal(shape = c(batch_size, latent_dim), dtype = tf$float64)
-      loss_mmd <- compute_mmd(true_samples, mean)
-      loss_nll <- k_mean(k_square(x - preds))
-      loss <- loss_nll + loss_mmd
+      # ELBO
+      # log p(x| z) + log p(z) - log q(z|x)
+      # way 1: all three terms estimated by Monte Carlo
+      crossentropy_loss <-
+        tf$nn$sigmoid_cross_entropy_with_logits(logits = preds, labels = x)
+      logpx_z <-
+        -tf$reduce_sum(crossentropy_loss, axis = list(1, 2, 3))
+      logpz <-
+        normal_loglik(z,
+                      k_constant(0, dtype = tf$float64),
+                      k_constant(0, dtype = tf$float64))
+      logqz_x <- normal_loglik(z, mean, logvar)
+      loss <- -tf$reduce_mean(logpx_z + logpz - logqz_x)
+      
+      
       
     })
     
     # cat(
     #   glue(
     #     "Losses (epoch): {epoch}:",
-    #     "  {as.numeric(loss_mmd) %>% round(2)} loss_mmd,",
-    #     "  {as.numeric(loss_nll) %>% round(2)} loss_nll,",
+    #     "  {as.numeric(logpx_z %>% tf$reduce_mean()) %>% round(2)} logpx_z,",
+    #     "  {as.numeric(logpz  %>% tf$reduce_mean()) %>% round(2)} logpz,",
+    #     "  {as.numeric(logqz_x  %>% tf$reduce_mean()) %>% round(2)} logqz_x,",
     #     "  {as.numeric(loss) %>% round(2)} loss"),
     #   "\n")
     
     total_loss <- total_loss + loss
-    loss_mmd_total <- loss_mmd + loss_mmd_total
-    loss_nll_total <- loss_nll + loss_nll_total
+    logpx_z_total <- tf$reduce_mean(logpx_z) + logpx_z_total
+    logpz_total <- tf$reduce_mean(logpz) + logpz_total
+    logqz_x_total <- tf$reduce_mean(logqz_x) + logqz_x_total
     
     encoder_gradients <- tape$gradient(loss, encoder$variables)
     decoder_gradients <- tape$gradient(loss, decoder$variables)
@@ -285,9 +293,10 @@ for (epoch in seq_len(num_epochs)) {
   cat(
     glue(
       "Losses (epoch): {epoch}:",
-      "  {(as.numeric(loss_nll_total)/batches_per_epoch) %>% round(4)} loss_nll_total,",
-      "  {(as.numeric(loss_mmd_total)/batches_per_epoch) %>% round(4)} loss_mmd_total,",
-      "  {(as.numeric(total_loss)/batches_per_epoch) %>% round(4)} total"
+      "  {(as.numeric(logpx_z_total)/batches_per_epoch) %>% round(2)} logpx_z_total,",
+      "  {(as.numeric(logpz_total)/batches_per_epoch) %>% round(2)} logpz_total,",
+      "  {(as.numeric(logqz_x_total)/batches_per_epoch) %>% round(2)} logqz_x_total,",
+      "  {(as.numeric(total_loss)/batches_per_epoch) %>% round(2)} total"
     ),
     "\n"
   )
