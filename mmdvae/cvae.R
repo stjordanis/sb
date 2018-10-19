@@ -1,7 +1,3 @@
-# https://github.com/tensorflow/tensorflow/blob/r1.11/tensorflow/contrib/eager/python/examples/generative_examples/cvae.ipynb
-
-reticulate::use_condaenv("tf-12-gpu-0410")
-
 library(keras)
 use_implementation("tensorflow")
 library(tensorflow)
@@ -12,19 +8,29 @@ library(dplyr)
 library(ggplot2)
 library(glue)
 
-#mnist <- dataset_mnist()
-mnist <- dataset_fashion_mnist()
 
-c(train_images, train_labels) %<-% mnist$train
-c(test_images, test_labels) %<-% mnist$test
+# Setup and preprocessing -------------------------------------------------
 
-#images[images[, , ] < 127] <- 0
-#images[images[, , ] >= 127] <- 1
+fashion <- dataset_fashion_mnist()
+
+c(train_images, train_labels) %<-% fashion$train
+c(test_images, test_labels) %<-% fashion$test
 
 train_x <-
   train_images %>% `/`(255) %>% k_reshape(c(60000, 28, 28, 1))
 test_x <-
   test_images %>% `/`(255) %>% k_reshape(c(10000, 28, 28, 1))
+
+class_names = c('T-shirt/top',
+                'Trouser',
+                'Pullover',
+                'Dress',
+                'Coat', 
+                'Sandal',
+                'Shirt',
+                'Sneaker',
+                'Bag',
+                'Ankle boot')
 
 buffer_size <- 60000
 batch_size <- 100
@@ -36,6 +42,10 @@ train_dataset <- tensor_slices_dataset(train_x) %>%
 
 test_dataset <- tensor_slices_dataset(test_x) %>%
   dataset_batch(10000)
+
+
+
+# Model -------------------------------------------------------------------
 
 latent_dim <- 2
 
@@ -64,7 +74,7 @@ encoder_model <- function(name = NULL) {
         self$conv2() %>%
         self$flatten() %>%
         self$dense() %>%
-        tf$split(num_or_size_splits = 2L, axis = 1) # 0-based
+        tf$split(num_or_size_splits = 2L, axis = 1L) 
     }
   })
 }
@@ -73,7 +83,6 @@ decoder_model <- function(name = NULL) {
   keras_model_custom(name = name, function(self) {
     self$dense <- layer_dense(units = 7 * 7 * 32, activation = "relu")
     self$reshape <- layer_reshape(target_shape = c(7, 7, 32))
-    
     self$deconv1 <-
       layer_conv_2d_transpose(
         filters = 64,
@@ -109,41 +118,43 @@ decoder_model <- function(name = NULL) {
   })
 }
 
-
-# Sampling and loss --------------------------------------------------------------------
-
 reparameterize <- function(mean, logvar) {
-  eps = tf$random_normal(shape = mean$shape)
-  tf$exp(logvar * .5) + mean
+  eps <- k_random_normal(shape = mean$shape, dtype = tf$float64)
+  eps * k_exp(logvar * 0.5) + mean
 }
 
 
-normal_loglik <- function(sample, mean, logvar, reduce_axis = 1L) {
-  loglik <-  k_constant(0.5, dtype = tf$float64) * (tf$log(2 * k_constant(pi, dtype = tf$float64)) +
-                                                      logvar +
-                                                      tf$exp(-logvar) * (sample - mean) ^ 2)
-  - tf$reduce_sum(loglik, axis = reduce_axis)
+# Loss and optimizer ------------------------------------------------------
+
+normal_loglik <- function(sample, mean, logvar, reduce_axis = 2) {
+  loglik <- k_constant(0.5, dtype = tf$float64) * 
+    (k_log(2 * k_constant(pi, dtype = tf$float64)) +
+     logvar +
+     k_exp(-logvar) * (sample - mean) ^ 2)
+  - k_sum(loglik, axis = reduce_axis)
 }
 
 optimizer <- tf$train$AdamOptimizer(1e-4)
 
 
-# Generation --------------------------------------------------------------
 
-num_examples_to_generate <- 16
+# Output utilities --------------------------------------------------------
 
-random_vector_for_generation <- k_random_normal(shape = list(num_examples_to_generate, latent_dim),
-                                                dtype = tf$float64)
+num_examples_to_generate <- 64
 
-generate_random_digits <- function(epoch) {
+random_vector_for_generation <-
+  k_random_normal(shape = list(num_examples_to_generate, latent_dim),
+                  dtype = tf$float64)
+
+generate_random_clothes <- function(epoch) {
   predictions <-
     decoder(random_vector_for_generation) %>% tf$nn$sigmoid()
-  png(paste0("fashion_cvae_digits_epoch_", epoch, ".png"))
-  par(mfcol = c(4, 4))
+  png(paste0("cvae_clothes_epoch_", epoch, ".png"))
+  par(mfcol = c(8, 8))
   par(mar = c(0.5, 0.5, 0.5, 0.5),
       xaxs = 'i',
       yaxs = 'i')
-  for (i in 1:16) {
+  for (i in 1:64) {
     img <- predictions[i, , , 1]
     img <- t(apply(img, 2, rev))
     image(
@@ -158,7 +169,6 @@ generate_random_digits <- function(epoch) {
   dev.off()
 }
 
-
 show_latent_space <- function(epoch) {
   iter <- make_iterator_one_shot(test_dataset)
   x <-  iterator_get_next(iter)
@@ -166,11 +176,14 @@ show_latent_space <- function(epoch) {
   x_test_encoded %>%
     as.matrix() %>%
     as.data.frame() %>%
-    mutate(class = as.factor(mnist$test$y)) %>%
+    mutate(class = class_names[fashion$test$y + 1]) %>%
     ggplot(aes(x = V1, y = V2, colour = class)) + geom_point() +
-    theme(aspect.ratio = 1)
+    theme(aspect.ratio = 1) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "null")) +
+    theme(panel.spacing = unit(c(0, 0, 0, 0), "null"))
+  
   ggsave(
-    paste0("fashion_cvae_latentspace_epoch_", epoch, ".png"),
+    paste0("cvae_latentspace_epoch_", epoch, ".png"),
     width = 10,
     height = 10,
     units = "cm"
@@ -179,11 +192,12 @@ show_latent_space <- function(epoch) {
 
 
 show_grid <- function(epoch) {
-  
-  png(paste0("fashion_cvae_grid_epoch_", epoch, ".png"))
-  
+  png(paste0("cvae_grid_epoch_", epoch, ".png"))
+  par(mar = c(0.5, 0.5, 0.5, 0.5),
+      xaxs = 'i',
+      yaxs = 'i')
   n <- 16
-  digit_size <- 28
+  img_size <- 28
   
   grid_x <- seq(-4, 4, length.out = n)
   grid_y <- seq(-4, 4, length.out = n)
@@ -194,10 +208,8 @@ show_grid <- function(epoch) {
     for (j in 1:length(grid_y)) {
       z_sample <- matrix(c(grid_x[i], grid_y[j]), ncol = 2)
       column <-
-        rbind(
-          column,
-          (decoder(z_sample) %>% tf$nn$sigmoid() %>% as.numeric()) %>% matrix(ncol = digit_size)
-        )
+        rbind(column,
+              (decoder(z_sample) %>% tf$nn$sigmoid() %>% as.numeric()) %>% matrix(ncol = img_size))
     }
     rows <- cbind(rows, column)
   }
@@ -208,7 +220,7 @@ show_grid <- function(epoch) {
 
 # Training loop -----------------------------------------------------------
 
-num_epochs <- 100
+num_epochs <- 50
 
 encoder <- encoder_model()
 decoder <- decoder_model()
@@ -220,7 +232,7 @@ checkpoint <-
                       encoder = encoder,
                       decoder = decoder)
 
-generate_random_digits(0)
+generate_random_clothes(0)
 show_latent_space(0)
 show_grid(0)
 
@@ -237,38 +249,23 @@ for (epoch in seq_len(num_epochs)) {
     x <-  iterator_get_next(iter)
     
     with(tf$GradientTape(persistent = TRUE) %as% tape, {
-      # both of shape (bs, 2)
+      
       c(mean, logvar) %<-% encoder(x)
       z <- reparameterize(mean, logvar)
-      # shape is (bs, 28, 28, 1)
       preds <- decoder(z)
       
-      # ELBO
-      # log p(x| z) + log p(z) - log q(z|x)
-      # way 1: all three terms estimated by Monte Carlo
       crossentropy_loss <-
         tf$nn$sigmoid_cross_entropy_with_logits(logits = preds, labels = x)
       logpx_z <-
-        -tf$reduce_sum(crossentropy_loss, axis = list(1, 2, 3))
+        -k_sum(crossentropy_loss)
       logpz <-
         normal_loglik(z,
                       k_constant(0, dtype = tf$float64),
                       k_constant(0, dtype = tf$float64))
       logqz_x <- normal_loglik(z, mean, logvar)
-      loss <- -tf$reduce_mean(logpx_z + logpz - logqz_x)
-      
-      
+      loss <- -k_mean(logpx_z + logpz - logqz_x)
       
     })
-    
-    # cat(
-    #   glue(
-    #     "Losses (epoch): {epoch}:",
-    #     "  {as.numeric(logpx_z %>% tf$reduce_mean()) %>% round(2)} logpx_z,",
-    #     "  {as.numeric(logpz  %>% tf$reduce_mean()) %>% round(2)} logpz,",
-    #     "  {as.numeric(logqz_x  %>% tf$reduce_mean()) %>% round(2)} logqz_x,",
-    #     "  {as.numeric(loss) %>% round(2)} loss"),
-    #   "\n")
     
     total_loss <- total_loss + loss
     logpx_z_total <- tf$reduce_mean(logpx_z) + logpx_z_total
@@ -277,6 +274,7 @@ for (epoch in seq_len(num_epochs)) {
     
     encoder_gradients <- tape$gradient(loss, encoder$variables)
     decoder_gradients <- tape$gradient(loss, decoder$variables)
+    
     optimizer$apply_gradients(purrr::transpose(list(
       encoder_gradients, encoder$variables
     )),
@@ -301,9 +299,12 @@ for (epoch in seq_len(num_epochs)) {
     "\n"
   )
   
-  if (epoch %% 10 == 0) {
-    generate_random_digits(epoch)
+  if (epoch %% 1 == 0) {
+    generate_random_clothes(epoch)
     show_latent_space(epoch)
     show_grid(epoch)
   }
 }
+
+checkpoint$restore("checkpoints_cvae_fashion/ckpt-50")
+epoch <- 50

@@ -1,6 +1,3 @@
-# http://szhao.me/2017/06/10/a-tutorial-on-mmd-variational-autoencoders.html
-reticulate::use_condaenv("tf-12-gpu-0410")
-
 library(keras)
 use_implementation("tensorflow")
 library(tensorflow)
@@ -11,18 +8,29 @@ library(dplyr)
 library(ggplot2)
 library(glue)
 
-mnist <- dataset_fashion_mnist()
 
-c(train_images, train_labels) %<-% mnist$train
-c(test_images, test_labels) %<-% mnist$test
+# Setup and preprocessing -------------------------------------------------
 
-#images[images[, , ] < 127] <- 0
-#images[images[, , ] >= 127] <- 1
+fashion <- dataset_fashion_mnist()
+
+c(train_images, train_labels) %<-% fashion$train
+c(test_images, test_labels) %<-% fashion$test
 
 train_x <-
   train_images %>% `/`(255) %>% k_reshape(c(60000, 28, 28, 1))
 test_x <-
   test_images %>% `/`(255) %>% k_reshape(c(10000, 28, 28, 1))
+
+class_names = c('T-shirt/top',
+                'Trouser',
+                'Pullover',
+                'Dress',
+                'Coat', 
+                'Sandal',
+                'Shirt',
+                'Sneaker',
+                'Bag',
+                'Ankle boot')
 
 buffer_size <- 60000
 batch_size <- 100
@@ -35,9 +43,13 @@ train_dataset <- tensor_slices_dataset(train_x) %>%
 test_dataset <- tensor_slices_dataset(test_x) %>%
   dataset_batch(10000)
 
+
+# Model -------------------------------------------------------------------
+
 latent_dim <- 2
 
 encoder_model <- function(name = NULL) {
+  
   keras_model_custom(name = name, function(self) {
     self$conv1 <-
       layer_conv_2d(
@@ -67,6 +79,7 @@ encoder_model <- function(name = NULL) {
 }
 
 decoder_model <- function(name = NULL) {
+  
   keras_model_custom(name = name, function(self) {
     self$dense <- layer_dense(units = 7 * 7 * 32, activation = "relu")
     self$reshape <- layer_reshape(target_shape = c(7, 7, 32))
@@ -108,8 +121,7 @@ decoder_model <- function(name = NULL) {
 }
 
 
-# Loss --------------------------------------------------------------------
-
+# Loss and optimizer ------------------------------------------------------
 
 optimizer <- tf$train$AdamOptimizer(1e-4)
 
@@ -117,7 +129,6 @@ compute_kernel <- function(x, y) {
   x_size <- k_shape(x)[1]
   y_size <- k_shape(y)[1]
   dim <- k_shape(x)[2]
-  # (28,28,28)
   tiled_x <- k_tile(k_reshape(x, k_stack(list(x_size, 1, dim))), k_stack(list(1, y_size, 1)))
   tiled_y <- k_tile(k_reshape(y, k_stack(list(1, y_size, dim))), k_stack(list(x_size, 1, 1)))
   k_exp(-k_mean(k_square(tiled_x - tiled_y), axis = 3) / k_cast(dim, tf$float64))
@@ -131,23 +142,23 @@ compute_mmd <- function(x, y, sigma_sqr = 1) {
 }
 
 
+# Output utilities --------------------------------------------------------
 
-# Generation --------------------------------------------------------------
+num_examples_to_generate <- 64
 
-num_examples_to_generate <- 16
+random_vector_for_generation <-
+  k_random_normal(shape = list(num_examples_to_generate, latent_dim),
+                  dtype = tf$float64)
 
-random_vector_for_generation <- k_random_normal(shape = list(num_examples_to_generate, latent_dim),
-                                                dtype = tf$float64)
-
-generate_random_digits <- function(epoch) {
+generate_random_clothes <- function(epoch) {
   predictions <-
     decoder(random_vector_for_generation) 
-  png(paste0("mmd_digits_epoch_", epoch, ".png"))
-  par(mfcol = c(4, 4))
+  png(paste0("mmd_clothes_epoch_", epoch, ".png"))
+  par(mfcol = c(8, 8))
   par(mar = c(0.5, 0.5, 0.5, 0.5),
       xaxs = 'i',
       yaxs = 'i')
-  for (i in 1:16) {
+  for (i in 1:64) {
     img <- predictions[i, , , 1]
     img <- t(apply(img, 2, rev))
     image(
@@ -162,17 +173,19 @@ generate_random_digits <- function(epoch) {
   dev.off()
 }
 
-
 show_latent_space <- function(epoch) {
+  
   iter <- make_iterator_one_shot(test_dataset)
   x <-  iterator_get_next(iter)
   x_test_encoded <- encoder(x)
   x_test_encoded %>%
     as.matrix() %>%
     as.data.frame() %>%
-    mutate(class = as.factor(mnist$test$y)) %>%
+    mutate(class = class_names[fashion$test$y + 1]) %>%
     ggplot(aes(x = V1, y = V2, colour = class)) + geom_point() +
-    theme(aspect.ratio = 1)
+    theme(aspect.ratio = 1) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "null")) +
+    theme(panel.spacing = unit(c(0, 0, 0, 0), "null"))
   ggsave(
     paste0("mmd_latentspace_epoch_", epoch, ".png"),
     width = 10,
@@ -181,13 +194,13 @@ show_latent_space <- function(epoch) {
   )
 }
 
-
 show_grid <- function(epoch) {
-  
   png(paste0("mmd_grid_epoch_", epoch, ".png"))
-  
+  par(mar = c(0.5, 0.5, 0.5, 0.5),
+      xaxs = 'i',
+      yaxs = 'i')
   n <- 16
-  digit_size <- 28
+  img_size <- 28
   
   grid_x <- seq(-4, 4, length.out = n)
   grid_y <- seq(-4, 4, length.out = n)
@@ -198,10 +211,8 @@ show_grid <- function(epoch) {
     for (j in 1:length(grid_y)) {
       z_sample <- matrix(c(grid_x[i], grid_y[j]), ncol = 2)
       column <-
-        rbind(
-          column,
-          (decoder(z_sample) %>% as.numeric()) %>% matrix(ncol = digit_size)
-        )
+        rbind(column,
+              (decoder(z_sample) %>% as.numeric()) %>% matrix(ncol = img_size))
     }
     rows <- cbind(rows, column)
   }
@@ -212,19 +223,19 @@ show_grid <- function(epoch) {
 
 # Training loop -----------------------------------------------------------
 
-num_epochs <- 100
+num_epochs <- 50
 
 encoder <- encoder_model()
 decoder <- decoder_model()
 
-checkpoint_dir <- "./checkpoints_mmd_fashion"
+checkpoint_dir <- "./checkpoints_fashion_cvae"
 checkpoint_prefix <- file.path(checkpoint_dir, "ckpt")
 checkpoint <-
   tf$train$Checkpoint(optimizer = optimizer,
                       encoder = encoder,
                       decoder = decoder)
 
-generate_random_digits(0)
+generate_random_clothes(0)
 show_latent_space(0)
 show_grid(0)
 
@@ -242,10 +253,6 @@ for (epoch in seq_len(num_epochs)) {
     with(tf$GradientTape(persistent = TRUE) %as% tape, {
       
       mean <- encoder(x)
-      
-      # not needed it seems??
-      #z <- reparameterize(mean, logvar)
-      # shape is (bs, 28, 28, 1)
       preds <- decoder(mean)
       
       true_samples <- k_random_normal(shape = c(batch_size, latent_dim), dtype = tf$float64)
@@ -255,20 +262,13 @@ for (epoch in seq_len(num_epochs)) {
       
     })
     
-    # cat(
-    #   glue(
-    #     "Losses (epoch): {epoch}:",
-    #     "  {as.numeric(loss_mmd) %>% round(2)} loss_mmd,",
-    #     "  {as.numeric(loss_nll) %>% round(2)} loss_nll,",
-    #     "  {as.numeric(loss) %>% round(2)} loss"),
-    #   "\n")
-    
     total_loss <- total_loss + loss
     loss_mmd_total <- loss_mmd + loss_mmd_total
     loss_nll_total <- loss_nll + loss_nll_total
     
     encoder_gradients <- tape$gradient(loss, encoder$variables)
     decoder_gradients <- tape$gradient(loss, decoder$variables)
+    
     optimizer$apply_gradients(purrr::transpose(list(
       encoder_gradients, encoder$variables
     )),
@@ -293,8 +293,11 @@ for (epoch in seq_len(num_epochs)) {
   )
   
   if (epoch %% 10 == 0) {
-    generate_random_digits(epoch)
+    generate_random_clothes(epoch)
     show_latent_space(epoch)
     show_grid(epoch)
   }
 }
+
+checkpoint$restore("checkpoints_mmd_fashion/ckpt-50")
+epoch <- 50

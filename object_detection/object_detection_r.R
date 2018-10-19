@@ -123,7 +123,6 @@ image_size <- target_height
 
 ssd_generator <-
   function(data,
-           max_pad,
            target_height,
            target_width,
            shuffle,
@@ -141,12 +140,12 @@ ssd_generator <-
 
       x <-
         array(0, dim = c(length(indices), target_height, target_width, 3))
-      y_maxlen <- 4 * max_pad + max_pad # 185
-      y <- array(0, dim = c(length(indices), y_maxlen))
+      y1 <- array(0, dim = c(length(indices), 16))
+      y2 <- array(0, dim = c(length(indices), 16, 4))
       
       for (j in 1:length(indices)) {
         print(j)
-        x[j, , ,] <-
+        x[j, , , ] <-
           load_and_preprocess_image(data[[indices[j], "file_name"]], target_height, target_width)
         
         class_string <- data[indices[j], ]$categories
@@ -166,11 +165,17 @@ ssd_generator <-
         overlaps <- jaccard(bbox, anchor_corners)
         c(gt_overlap, gt_idx) %<-% map_to_ground_truth(overlaps)
         gt_class <- classes[gt_idx]
+        pos <- gt_overlap > 0.4
         gt_class[gt_overlap < 0.4] <- 21
         gt_bbox <- boxes[ , gt_idx]
+        gt_bbox[ , !pos] <- 0
+        gt_bbox <- gt_bbox %>% t()
+        y1[j, ] <- gt_class
+        y2[j, , ] <- gt_bbox
+
       }
       x <- x/255
-      list(x, y)
+      list(x, list(y1, y2))
     }
   }
 
@@ -179,7 +184,6 @@ ssd_generator <-
 
 train_gen <- ssd_generator(
   imageinfo4ssd,
-  max_pad = 37,
   target_height = target_height,
   target_width = target_width,
   #shuffle = TRUE,
@@ -188,26 +192,13 @@ train_gen <- ssd_generator(
 )
 
 batch <- train_gen()
-c(x,y) %<-% batch
+c(x,c(y1, y2)) %<-% batch
 x %>% dim()
-y_boxes <- y[ , 1:(max_pad * 4)]
-y_classes <- y[ , (max_pad * 4 + 1):(max_pad * 4 + max_pad)]
-
+y1
+y2[1, , ]
+y2[3, , ]
 
 # SSD loss ----------------------------------------------------------------
-
-# image size
-
-
-# predictions will come in with shape (batchsize, 16, 25)
-# 16 is number of grid cells
-# 25 is concatenation of 21 and 4
-# 21 class preds per box
-# 4 bbox coords per box
-
-# ground truth will come in with shape (batchsize, n * (1 + 4))
-# where n is maximum number of detections in image
-
 
 ### overall loss
 ssd_loss <- function(y_true, y_pred) {
@@ -287,27 +278,7 @@ activations_to_bboxes <- function(activations, anchors) {
 
 
 
-
-
-# test_y_pred <- array(runif(batch_size * 16 * 25), dim = c(batch_size, 16, 25)) %>% k_constant()
-# 
-# test_y_true_cl <- matrix(c(1,14,14,0,11,17), nrow = 2, ncol = 3, byrow = TRUE)
-# test_y_true_bb <- matrix(c(91,47,223,169,0,49,205,180,9,169,217,222,
-#                            0,0,0,0,81,49,166,171,63,1,222,223), nrow = 2, ncol = 12, byrow = TRUE)
-# test_y_true <- cbind(test_y_true_bb, test_y_true_cl) %>% k_constant()
-
-#ssd_loss(test_y_true, test_y_pred) %>% k_eval()
-
-
-
 # Build model -------------------------------------------------------------
-
-
-
-#n_anchors_per_cell <- 1
-
-#n_filters <- n_anchors_per_cell * (4 + n_classes)
-
 
 feature_extractor <- application_resnet50(include_top = FALSE, input_shape = c(224, 224, 3))
 
@@ -318,72 +289,20 @@ common <- feature_extractor$output %>%
   layer_conv_2d(filters = 256, kernel_size = 3, padding = "same", name = "head_conv1") %>%
   layer_conv_2d(filters = 256, kernel_size = 3, strides = 2, padding = "same", name = "head_conv2")
 
-bbox_conv <- layer_conv_2d(common, filters = 4, kernel_size = 3, padding = "same", name = "bbox_conv") %>%
-  layer_reshape(target_shape = c(-1, 4), name = "bbox_flatten")
-class_conv <- layer_conv_2d(common, filters = n_classes + 1, kernel_size = 3, padding = "same", name = "class_conv") %>%
-  layer_reshape(target_shape = c(-1, 21), name = "class_flatten")
-# outputs are ([bs, 16, 4]) and ([bs, 16, 21])
-# total output is (bs, 16, 25)
-concat <- layer_concatenate(list(bbox_conv, class_conv))
+bbox_output <- layer_conv_2d(common, filters = 4, kernel_size = 3, padding = "same", name = "bbox_conv") %>%
+  layer_reshape(target_shape = c(16, 4), name = "bbox_flatten")
+class_output <- layer_conv_2d(common, filters = 1, kernel_size = 3, padding = "same", name = "class_conv") %>%
+  layer_reshape(target_shape = c(16), name = "class_flatten")
 
 model <-
   keras_model(inputs = input,
-              outputs = concat)
+              outputs = list(bbox_output, class_output))
 
 model %>% freeze_weights()
 model
 model %>% unfreeze_weights(from = "head_conv1")
 model
        
-model %>% compile(loss = ssd_loss, optimizer = "adam")
+model %>% compile(loss = list(bbox_loss, class_loss), optimizer = "adam")
 
 
-
-
-############ tbd with model predictions
-
-
-
-##### ground truth
-# idx is index into batch
-# bbox,clas = get_y(y[0][idx], y[1][idx]) # ground truth
-# bbox,clas sizes: 3*4, 3
-
-##### model output
-
-## before
-
-# batch = learn.model(x)
-# b_clas,b_bb = batch
-# b_clasi = b_clas[idx] 
-# b_bboxi = b_bb[idx]
-
-# Here is our 4x4 grid cells from our final convolutional layer 
-#torch_gt(ax, ima, anchor_cnr, b_clasi.max(1)[1])
-
-## now: matching problem
-
-# we are going to go through a matching problem where we are going to take every one of these 16 boxes and see which one of these three ground truth objects has the highest amount of overlap with a given square
-
-# a_ic = actn_to_bb(b_bboxi, anchors) 
-# overlaps = jaccard(bbox.data, anchor_cnr.data) # 3x16
-
-# for each ground truth object, find maximally overlapping cell
-# overlaps.max(1)
-# for each grid cell, what object does it overlap with most 
-# overlaps.max(0)
-
-# The way it assign that is each of the three (row-wise max) gets assigned as is. For the rest of the anchor boxes, they get assigned to anything which they have an overlap of at least 0.5 with (column-wise). If neither applies, it is considered to be a cell which contains background.
-# gt_overlap,gt_idx = map_to_ground_truth(overlaps)
-
-#  Now we can combine these values to classes:
-# gt_clas = clas[gt_idx]; gt_clas
-
-# Then add a threshold and finally comes up with the three classes that are being predicted:
-#thresh = 0.5
-#pos = gt_overlap > thresh
-#pos_idx = torch.nonzero(pos)[:,0]
-#neg_idx = torch.nonzero(1-pos)[:,0]
-#pos_idx
-#gt_clas[1-pos] = len(id2cat)
-#[id2cat[o] if o<len(id2cat) else 'bg' for o in gt_clas.data]
